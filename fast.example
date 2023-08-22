@@ -1,0 +1,187 @@
+import glob
+import h5py
+import numpy as np
+import os
+from matplotlib import pyplot as plt
+from FastLZeroSpikeInference import fast
+
+def read_h5_file(file_path):
+    try:
+        # Read h5 file
+        h5 = h5py.File(file_path, 'r')
+        
+        # Get data from h5 datastructure
+        dto = 1.0 * np.array(h5['dto'])
+        dte = 1.0 * np.array(h5['dte'])
+        quiroga = 1.0 * np.array(h5['quiroga'])
+        dff = np.array(h5['dff']).ravel()
+        sptimes = np.array(h5['sptimes']).ravel()
+        genotype = h5['genotype'][()].decode("utf-8")
+        ephys = np.array(h5['ephys_baseline_subtracted']).ravel()
+
+        return {
+            "genotype": genotype,
+            "dff": dff,
+            "ephys": ephys,
+            "dto": dto,
+            "dte": dte,
+            "sptimes": sptimes,
+            "quiroga": quiroga
+        }
+    except Exception as e:
+        print(f"Error reading file {file_path}: {e}")
+        return None
+
+def plot_data(data_dict, file_name):
+    dto, dte, dff, ephys, sptimes, quiroga = (
+        data_dict["dto"],
+        data_dict["dte"],
+        data_dict["dff"],
+        data_dict["ephys"],
+        data_dict["sptimes"],
+        data_dict["quiroga"],
+    )
+
+    # Generate data for estimating spikes
+    gam = 0.98
+    lam = 0.05
+
+    # Estimate spikes using FastLZeroSpikeInference
+    fit = fast.estimate_spikes(data_dict["dff"], gam, lam, False, True)
+    fit = fast.estimate_calcium(fit)
+
+    # Ensure estimated data has the same length as original data
+    estimated_calcium = fit['estimated_calcium'][:len(dff)]
+
+
+
+
+
+
+    # Plot original data and estimated calcium values in subplots
+    fig, axs = plt.subplots(3, 3, figsize=(18, 15))
+    fig.suptitle(file_name)
+
+    axs[0, 0].plot(np.arange(0, len(dff) * dto, dto), dff, 'g')
+    axs[0, 0].set_ylabel('DF/F')
+    axs[0, 0].set_title('Original Data')
+
+    axs[1, 0].plot(np.arange(0, len(ephys) * dte, dte), 1000 * ephys, 'k')
+    axs[1, 0].set_ylabel('mV')
+    axs[1, 0].axhline(y=1000.0 * quiroga, color='r', alpha=0.5)
+    axs[1, 0].set_title('Ephys')
+
+    axs[2, 0].eventplot(
+        sptimes,
+        orientation='horizontal',
+        lineoffsets=-1,
+        linelengths=0.5,
+        linewidths=None,
+        colors='r',
+        linestyles='solid'
+    )
+    axs[2, 0].set_ylabel('spikes')
+    axs[2, 0].set_xlabel('Time [s]')
+    axs[2, 0].tick_params(labelleft=False)
+    axs[2, 0].set_title('Spike Times')
+
+    axs[0, 2].plot(np.arange(0, len(dff) * dto, dto), estimated_calcium, 'b')
+    axs[0, 2].set_ylabel('DF/F')
+    axs[0, 2].set_title('Estimated Calcium')
+
+    axs[1, 2].eventplot(
+        fit['spikes'] * dto,
+        orientation='horizontal',
+        lineoffsets=-1,
+        linelengths=0.5,
+        linewidths=None,
+        colors='b',
+        linestyles='solid'
+    )
+    axs[1, 2].set_ylabel('spikes')
+    axs[1, 2].set_xlabel('Time [s]')
+    axs[1, 2].tick_params(labelleft=False)
+    axs[1, 2].set_title('Estimated Spike Times')
+
+    plt.savefig(f'{file_name}_traces.png')
+    plt.show()
+
+# Set the directory path
+data_directory = "/Users/petrusgynther/Desktop/ca-signal-deconvolution-main"
+
+# Get all .h5 files' names
+path = os.path.join(data_directory, "src", "*.h5")
+
+for file_path in glob.glob(path):
+    file_name = os.path.split(file_path)[-1].split(".")[0]
+    print(f"Processing file: {file_name}")
+    
+    
+    data_dict = read_h5_file(file_path)
+    if data_dict is not None:
+        gam = 0.00001
+        lam = 0.000000000000001
+        fit = fast.estimate_spikes(data_dict["dff"], gam, lam, True, True)
+        fit = fast.estimate_calcium(fit)
+        num_spikes_original = len(data_dict["sptimes"])
+
+        estimated_spikes = fit['spikes'][0]
+        num_estimated_spikes = len(fit['spikes'])
+
+
+
+        print("Number of spikes in the original data:", num_spikes_original)
+        print("Number of estimated spikes:", num_estimated_spikes)  
+
+
+        plot_data(data_dict, file_name)
+
+# Rest of your code...
+
+# Set the directory path
+data_directory = "/Users/petrusgynther/Desktop/ca-signal-deconvolution-main"
+# Get all .h5 files' names
+path = os.path.join(data_directory, "src", "*.h5")
+
+def calculate_victor_purpura_distance(true_spikes, estimated_spikes, max_time):
+    true_spikes = np.array(true_spikes)
+    estimated_spikes = np.array(estimated_spikes)
+    
+    bins = np.arange(0, max_time, dtype=float)
+    true_histogram, _ = np.histogram(true_spikes, bins)
+    estimated_histogram, _ = np.histogram(estimated_spikes, bins)
+    
+    distance = np.sum(np.sqrt(0.5 * (true_histogram + estimated_histogram) * np.log(1 + (2 * true_histogram * estimated_histogram) / (true_histogram + estimated_histogram))))
+    return distance
+
+gam_values = [0.95, 0.98, 0.99, 0.9, 0.85,0.8,0.7,0.6,0.5,0.4,0.3,0.00001,0.00000000000001,0.0000000000001,0.0000000000000000000000000000000000001]  # Example gamma values
+lambda_values = [0.001, 0.01, 0.1, 0.2,0.0001,0.0001,0.3,0.000000001,0.000000000000002,0.000000000000001,0.0000000000000000000000000000000000000000000000001]  # Example lambda values
+
+best_score = float('inf')
+best_distance = float('inf')
+
+best_params = {}
+
+for gam in gam_values:
+    for lam in lambda_values:
+        total_distance = 0
+        
+        for file_path in glob.glob(path):
+            file_name = os.path.split(file_path)[-1].split(".")[0]
+            data_dict = read_h5_file(file_path)
+            
+            if data_dict is not None:
+                fit = fast.estimate_spikes(data_dict["dff"], gam, lam, True, True)
+                fit = fast.estimate_calcium(fit)
+                
+                # Calculate Victor-Purpura distance
+                distance = calculate_victor_purpura_distance(data_dict["sptimes"], fit['spikes'] * data_dict["dto"], len(data_dict["dff"]) * data_dict["dto"])
+                total_distance += distance
+                
+                # Update best parameters if a better distance is found
+                if total_distance < best_distance:
+                    best_distance = total_distance
+                    best_params = {'gam': gam, 'lambda': lam}
+                    
+
+print("Best Parameters:", best_params)
