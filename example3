@@ -1,0 +1,313 @@
+import glob
+import h5py
+import numpy as np
+import os
+from matplotlib import pyplot as plt
+from FastLZeroSpikeInference import fast
+from scipy.spatial.distance import squareform
+from elephant.spike_train_dissimilarity import van_rossum_distance,victor_purpura_distance
+import quantities as pq
+from neo import SpikeTrain
+from sklearn.metrics import f1_score
+
+
+def read_h5_file(file_path):
+    try:
+        # Read h5 file
+        h5 = h5py.File(file_path, 'r')
+        
+        # Get data from h5 datastructure
+        dto = 1.0 * np.array(h5['dto'])
+        dte = 1.0 * np.array(h5['dte'])
+        quiroga = 1.0 * np.array(h5['quiroga'])
+        dff = np.array(h5['dff']).ravel()
+        sptimes = np.array(h5['sptimes']).ravel()
+        genotype = h5['genotype'][()].decode("utf-8")
+        ephys = np.array(h5['ephys_baseline_subtracted']).ravel()
+
+        return {
+            "genotype": genotype,
+            "dff": dff,
+            "ephys": ephys,
+            "dto": dto,
+            "dte": dte,
+            "sptimes": sptimes,
+            "quiroga": quiroga
+        }
+    except Exception as e:
+        print(f"Error reading file {file_path}: {e}")
+        return None
+
+def plot_data(data_dict, file_name):
+    dto, dte, dff, ephys, sptimes, quiroga = (
+        data_dict["dto"],
+        data_dict["dte"],
+        data_dict["dff"],
+        data_dict["ephys"],
+        data_dict["sptimes"],
+        data_dict["quiroga"],
+    )
+
+    # Parameters for estimating spikes
+    gam = 0.97
+    lam = 0.0001
+
+    # Estimate spikes using FastLZeroSpikeInference
+    fit = fast.estimate_spikes(data_dict["dff"], gam, lam, True, True)
+    fit = fast.estimate_calcium(fit)
+
+    # Ensure estimated data has the same length as original data
+    estimated_calcium = fit['estimated_calcium'][:len(dff)]
+
+    # Plot original data and estimated calcium values in subplots
+    fig, axs = plt.subplots(3, 3, figsize=(18, 15))
+    fig.suptitle(file_name)
+    
+
+    axs[0, 0].plot(np.arange(0, len(dff) * dto, dto), dff, 'g')
+    axs[0, 0].set_ylabel('DF/F')
+    axs[0, 0].set_title('Original Data')
+
+    axs[1, 0].plot(np.arange(0, len(ephys) * dte, dte), 1000 * ephys, 'k')
+    axs[1, 0].set_ylabel('mV')
+    axs[1, 0].axhline(y=1000.0 * quiroga, color='r', alpha=0.5)
+    axs[1, 0].set_title('Ephys')
+
+    axs[2, 0].eventplot(
+        sptimes,
+        orientation='horizontal',
+        lineoffsets=-1,
+        linelengths=0.5,
+        linewidths=None,
+        colors='r',
+        linestyles='solid'
+    )
+    axs[2, 0].set_ylabel('spikes')
+    axs[2, 0].set_xlabel('Time [s]')
+    axs[2, 0].tick_params(labelleft=False)
+    axs[2, 0].set_title('Spike Times')
+
+    axs[0, 2].plot(np.arange(0, len(estimated_calcium) * dto, dto), estimated_calcium, 'b')
+    axs[0, 2].set_ylabel('DF/F')
+    axs[0, 2].set_title('Estimated Calcium')
+
+    # Plot estimated spike times with the same x-axis range as original spike times
+    axs[1, 2].eventplot(
+        fit['spikes'] * data_dict["dto"],  # Use data_dict["dto"] 
+        orientation='horizontal',
+        lineoffsets=-1,
+        linelengths=0.5,
+        linewidths=None,
+        colors='b',
+        linestyles='solid'
+    )
+    axs[1, 2].set_ylabel('spikes')
+    axs[1, 2].set_xlabel('Time [s]')
+    axs[1, 2].tick_params(labelleft=False)
+    axs[1, 2].set_title('Estimated Spike Times')
+
+    plt.savefig(f'{file_name}_traces.png')
+    plt.show()
+
+
+
+data_directory = "/Users/petrusgynther/Desktop/ca-signal-deconvolution-main"
+# Get all .h5 files' names
+path = os.path.join(data_directory, "src", "*.h5")
+best_score = float('inf')
+best_distance = float('inf')
+
+gam = 0.97
+lam = 0.0001
+
+
+
+# Loop through each file
+for file_path in glob.glob(path):
+    file_name = os.path.split(file_path)[-1].split(".")[0]
+    print(f"Processing file: {file_name}")
+
+    # Read data from h5 file
+    data_dict = read_h5_file(file_path)
+    if data_dict is not None:
+        fit = fast.estimate_spikes(data_dict["dff"], gam, lam, True, True)
+        fit = fast.estimate_calcium(fit)
+        start_time = 0  # Modify this to match your plot's start time
+        end_time = len(data_dict["dff"]) * data_dict["dto"]  # Modify this to match your plot's end time
+
+        # Filter spikes within the specified time range
+        true_spikes_in_range = [spike for spike in data_dict["sptimes"] if start_time <= spike <= end_time]
+        estimated_spikes_in_range = [spike * data_dict["dto"] for spike in fit['spikes'] if start_time <= spike * data_dict["dto"] <= end_time]
+
+        num_spikes_original = len(true_spikes_in_range)
+        num_estimated_spikes = len(estimated_spikes_in_range)
+
+        print("Number of spikes in the original data:", num_spikes_original)
+        print("Number of estimated spikes:", num_estimated_spikes)
+
+
+        # Calculate Victor-Purpura distance
+        q = 1 / (10 * pq.s)
+        estimated_spiketrain = SpikeTrain(fit['spikes'] * data_dict["dto"], units='s', t_stop=end_time)
+        true_spiketrain = SpikeTrain(data_dict["sptimes"], units='s', t_stop=end_time)
+        vp_distance = victor_purpura_distance([true_spiketrain, estimated_spiketrain], q)[0, 1]
+        print("Victor-Purpura Distance:", vp_distance)
+
+        # Calculate the second Van Rossum distance
+        estimated_spiketrain = SpikeTrain(fit['spikes'] * data_dict["dto"], units='s', t_stop=end_time)
+        true_spiketrain = SpikeTrain(data_dict["sptimes"], units='s', t_stop=end_time)
+        tau_1 = 1 * pq.s
+        distance_vr2 = van_rossum_distance([true_spiketrain, estimated_spiketrain], time_constant=tau_1)[0, 1]
+        print("Van Rossum distance:", distance_vr2)
+
+
+
+        plot_data(data_dict, file_name)   
+
+
+
+
+        
+# Set the directory path
+data_directory = "/Users/petrusgynther/Desktop/ca-signal-deconvolution-main"
+# Get all .h5 files' names
+path = os.path.join(data_directory, "src", "*.h5")
+
+
+gam_values = [0.95, 0.96, 0.97, 0.99, 0.9, 0.98,0.99, 0.85,0.8,0.7,0.6,0.5]
+lambda_values = [0.05, 0.3, 0.2,0.001, 0.0001, 0.00001, 0.000000001,0.8,0.01]
+
+best_distance_vp = float('inf')
+second_best_distance_vp = float('inf')
+best_distance_vr = float('inf')
+second_best_distance_vr = float('inf')
+best_similarity_schreiber = 0.0  # Initialize with lowest Schreiber similarity
+second_best_similarity_schreiber = 0.0
+best_distance_vr2 = float('inf')
+second_best_distance_vr2 = float('inf')
+
+best_params_vp = {}
+second_best_params_vp = {}
+best_params_vr = {}
+best_params_vr2 = {}
+second_best_params_vr = {}
+second_best_params_vr2 = {}
+best_params_schreiber = {}
+second_best_params_schreiber = {}
+
+
+vp_distances_list = []
+
+
+for gam in gam_values:
+    for lam in lambda_values:
+        total_distance_vp = 0
+        total_distance_vr2 = 0
+        
+        for file_path in glob.glob(path):
+            file_name = os.path.split(file_path)[-1].split(".")[0]
+            data_dict = read_h5_file(file_path)
+            
+            if data_dict is not None:
+                fit = fast.estimate_spikes(data_dict["dff"], gam, lam, True, True)
+                fit = fast.estimate_calcium(fit)
+                
+                # Calculate Victor-Purpura distance
+                q = 1 / (10 * pq.s)
+                estimated_spiketrain = SpikeTrain(fit['spikes'] * data_dict["dto"], units='s', t_stop=end_time)
+                true_spiketrain = SpikeTrain(data_dict["sptimes"], units='s', t_stop=end_time)
+                vp_distance = victor_purpura_distance([true_spiketrain, estimated_spiketrain],q)[0, 1]
+                total_distance_vp += vp_distance
+
+        
+
+                #calculate 2nd van rossum
+                estimated_spiketrain = SpikeTrain(fit['spikes'] * data_dict["dto"], units='s', t_stop=end_time)
+                true_spiketrain = SpikeTrain(data_dict["sptimes"], units='s', t_stop=end_time)
+                tau_1 = 1 * pq.s
+                distance_vr2 = van_rossum_distance([true_spiketrain, estimated_spiketrain], time_constant=tau_1)[0, 1]
+                total_distance_vr2 += distance_vr2
+
+                # Update best and second best parameters for Victor-Purpura distance
+                if total_distance_vp < best_distance_vp:
+                    second_best_distance_vp = best_distance_vp
+                    second_best_params_vp = best_params_vp
+                    best_distance_vp = total_distance_vp
+                    best_params_vp = {'gam': gam, 'lambda': lam}
+                elif total_distance_vp < second_best_distance_vp:
+                    second_best_distance_vp = total_distance_vp
+                    second_best_params_vp = {'gam': gam, 'lambda': lam}
+                
+                # Update best and second best parameters for Van Rossum distance
+                if distance_vr2 < best_distance_vr2:
+                    second_best_distance_vr2 = best_distance_vr2
+                    second_best_params_vr2 = best_params_vr2
+                    best_distance_vr2 = distance_vr2
+                    best_params_vr2 = {'gam': gam, 'lambda': lam}
+                elif distance_vr2 < second_best_distance_vr2:
+                    second_best_distance_vr2 = distance_vr2
+                    second_best_params_vr2 = {'gam': gam, 'lambda': lam}    
+
+        vp_distances_list.append({'gamma': gam, 'lambda': lam, 'total_distance': total_distance_vp})
+
+
+
+
+# Print the results for Victor-Purpura distance
+print("Best Parameters for Victor-Purpura Distance:", best_params_vp)
+print("Second Best Parameters for Victor-Purpura Distance:", second_best_params_vp)
+print("Best Victor-Purpura Distance:", best_distance_vp)
+print("Second Best Victor-Purpura Distance:", second_best_distance_vp)
+
+# Print the results for Van Rossum distance
+print("Best Parameters for Van Rossum Distance:", best_params_vr2)
+print("Second Best Parameters for Van Rossum Distance:", second_best_params_vr2)
+print("Best Van Rossum Distance:", best_distance_vr2)
+print("Second Best Van Rossum Distance:", second_best_distance_vr2)
+
+# Extract values from vp_distances_list
+gamma_values_plot = np.unique([entry['gamma'] for entry in vp_distances_list])
+lambda_values_plot = np.unique([entry['lambda'] for entry in vp_distances_list])
+
+# Create a 2D meshgrid of gamma and lambda values
+gamma_mesh, lambda_mesh = np.meshgrid(gamma_values_plot, lambda_values_plot)
+
+# Initialize an array to store total_distance values in the same grid shape
+total_distance_mesh = np.zeros_like(gamma_mesh)
+max_distance = np.max(total_distance_mesh)
+
+
+# Fill the total_distance values into the grid
+for entry in vp_distances_list:
+    gamma_idx = np.where(gamma_values_plot == entry['gamma'])[0][0]
+    lambda_idx = np.where(lambda_values_plot == entry['lambda'])[0][0]
+    total_distance_mesh[lambda_idx, gamma_idx] = entry['total_distance']
+
+# Find the indices of the lowest total distance value
+min_indices = np.unravel_index(np.argmin(total_distance_mesh), total_distance_mesh.shape)
+min_gamma = gamma_values_plot[min_indices[1]]
+min_lambda = lambda_values_plot[min_indices[0]]
+min_distance = total_distance_mesh[min_indices]
+
+# Create a 3D plot
+fig = plt.figure(figsize=(10, 8))
+ax = fig.add_subplot(111, projection='3d')
+
+# Plot the surface with a wider color range
+surface = ax.plot_surface(gamma_mesh, lambda_mesh, total_distance_mesh, cmap='viridis', edgecolor='none', vmin=0, vmax=np.max(total_distance_mesh))  # Adjust vmin and vmax
+
+# Mark the lowest value with a red dot
+ax.scatter(min_gamma, min_lambda, min_distance, color='red', s=100, label='Lowest Value')
+
+# Add colorbar
+cbar = fig.colorbar(surface, ax=ax, shrink=0.5, aspect=10)
+cbar.set_label('Total Distance')
+
+# Set labels and title
+ax.set_xlabel('Gamma')
+ax.set_ylabel('Lambda')
+ax.set_zlabel('Total Distance')
+ax.set_title('Victor-Purpura Total Distance for Different Gamma and Lambda Values')
+ax.legend()
+
+plt.show()
